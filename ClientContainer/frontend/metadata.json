@@ -1,0 +1,6 @@
+{
+  "name": "SecureChat",
+  "description": "An end-to-end encrypted messaging application with IBE identifier support and real-time polling.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
