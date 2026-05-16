@@ -61,5 +61,71 @@ export const chatApi = {
       console.error('Failed to fetch messages:', error);
       return { messages: [] };
     }
+  },
+
+  async getGroupInfo() {
+    try {
+      const response = await fetch(`${BASE_URL}/groups/info`);
+      return await response.json();
+    } catch (error) {
+      console.error('Failed to fetch group info:', error);
+      return { joined_groups: [], pending_invitations: [] };
+    }
+  },
+
+  async acceptGroupInvite(groupName) {
+    try {
+      const response = await fetch(`${BASE_URL}/groups/accept`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ group_name: groupName })
+      });
+      return await response.json();
+    } catch (error) {
+      console.error('Failed to accept group invite:', error);
+      throw error;
+    }
+  },
+
+  async createGroup(groupName) {
+    try {
+      const response = await fetch(`${BASE_URL}/groups/create`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ group_name: groupName })
+      });
+      return await response.json();
+    } catch (error) {
+      console.error('Failed to create group:', error);
+      throw error;
+    }
+  },
+
+  async inviteToGroup(groupName, targetUser) {
+    try {
+      const response = await fetch(`${BASE_URL}/groups/invite`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ group_name: groupName, target_user: targetUser })
+      });
+      return await response.json();
+    } catch (error) {
+      console.error('Failed to invite to group:', error);
+      throw error;
+    }
+  },
+
+  async sendGroupMessage(groupName, message) {
+    try {
+      const response = await fetch(`${BASE_URL}/groups/send`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ group_name: groupName, message: message })
+      });
+      return await response.json();
+    } catch (error) {
+      console.error('Failed to send group message:', error);
+      throw error;
+    }
   }
 };

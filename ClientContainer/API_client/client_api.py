@@ -29,6 +29,9 @@ client_socket = None
 config_lock = threading.Lock()
 local_messages_db = []
 active_users = []
+local_group_sks = {}
+pending_invitations = []
+joined_groups = []
 
 def listen_for_messages():
     """ Luồng chạy ngầm để hứng tin nhắn đẩy từ Socket Server về """
@@ -60,6 +63,82 @@ def listen_for_messages():
                 elif msg_type == "system":
                     # Xử lý báo lỗi (vd: gửi nhầm người không online)
                     print(f"[System Webhook] {msg_json.get('content')}")
+                    with config_lock:
+                        local_messages_db.append({
+                            "sender": "System",
+                            "receiver": username,
+                            "is_group": False,
+                            "message": msg_json.get('content'),
+                            "is_system": True
+                        })
+                    
+                elif msg_type == "group_created":
+                    group_name = msg_json.get("group_name")
+                    sk_bytes = base64.b64decode(msg_json.get("sk_group"))
+                    with config_lock:
+                        local_group_sks[group_name] = bytesToObject(sk_bytes, group)
+                        if group_name not in joined_groups:
+                            joined_groups.append(group_name)
+                        print(f"[+] Đã tạo và tham gia group: {group_name}")
+
+                elif msg_type == "group_invitation":
+                    group_name = msg_json.get("group_name")
+                    inviter = msg_json.get("inviter")
+                    with config_lock:
+                        pending_invitations.append({"group_name": group_name, "inviter": inviter})
+                        print(f"[+] Nhận lời mời vào group {group_name} từ {inviter}")
+
+                elif msg_type == "group_joined":
+                    group_name = msg_json.get("group_name")
+                    sk_bytes = base64.b64decode(msg_json.get("sk_group"))
+                    with config_lock:
+                        local_group_sks[group_name] = bytesToObject(sk_bytes, group)
+                        if group_name not in joined_groups:
+                            joined_groups.append(group_name)
+                        # Remove from pending if exists
+                        pending_invitations[:] = [inv for inv in pending_invitations if inv["group_name"] != group_name]
+                        print(f"[+] Đã tham gia group: {group_name}")
+
+                elif msg_type == "group_message":
+                    sender = msg_json.get("sender")
+                    group_name = msg_json.get("group_name")
+                    ibe_key_dict = msg_json["ibe_enc_key"]
+                    aes_nonce = base64.b64decode(msg_json["aes_nonce"])
+                    aes_ciphertext = base64.b64decode(msg_json["aes_ciphertext"])
+                    aes_tag = base64.b64decode(msg_json["aes_tag"])
+                    
+                    try:
+                        with config_lock:
+                            group_sk = local_group_sks.get(group_name)
+                        if not group_sk:
+                            print(f"[-] Không có secret key cho group {group_name}")
+                            continue
+                            
+                        ibe_ctxt = {}
+                        for k, v in ibe_key_dict.items():
+                            if v["type"] == "bytes":
+                                ibe_ctxt[k] = base64.b64decode(v["data"])
+                            elif v["type"] == "integer":
+                                ibe_ctxt[k] = integer(int(v["data"]))
+                            elif v["type"] == "element":
+                                ibe_ctxt[k] = bytesToObject(base64.b64decode(v["data"]), group)
+                            else:
+                                ibe_ctxt[k] = v["data"]
+                                
+                        session_key = ibe.decrypt(mpk, group_sk, ibe_ctxt)
+                        if session_key:
+                            cipher_aes = AES.new(session_key, AES.MODE_EAX, nonce=aes_nonce)
+                            plaintext = cipher_aes.decrypt_and_verify(aes_ciphertext, aes_tag)
+                            
+                            with config_lock:
+                                local_messages_db.append({
+                                    "sender": sender, 
+                                    "receiver": group_name, 
+                                    "is_group": True,
+                                    "message": plaintext.decode('utf-8')
+                                })
+                    except Exception as e:
+                        print(f"[-] Client_API lỗi khi giải mã group message: {e}")
                     
                 elif msg_type == "message":
                     sender = msg_json.get("sender")
@@ -89,6 +168,7 @@ def listen_for_messages():
                                 local_messages_db.append({
                                     "sender": sender, 
                                     "receiver": username, 
+                                    "is_group": False,
                                     "message": plaintext.decode('utf-8')
                                 })
                     except Exception as e:
@@ -233,6 +313,103 @@ def send_message():
     }
     
     # Gửi Payload qua TCP Stream
+    try:
+        client_socket.send(json.dumps(payload).encode('utf-8'))
+        return jsonify({"status": "success"})
+    except Exception as e:
+        return jsonify({"error": f"Lỗi tuột Socket: {str(e)}"}), 500
+
+@app.route('/groups/create', methods=['POST'])
+def create_group():
+    data = request.json
+    if not data or 'group_name' not in data:
+        return jsonify({"error": "Thiếu group_name"}), 400
+    with config_lock:
+        if not client_socket:
+            return jsonify({"error": "Chưa kết nối Socket"}), 400
+    
+    payload = {"type": "create_group", "group_name": data['group_name']}
+    client_socket.send(json.dumps(payload).encode('utf-8'))
+    return jsonify({"status": "request_sent"})
+
+@app.route('/groups/invite', methods=['POST'])
+def invite_group():
+    data = request.json
+    if not data or 'group_name' not in data or 'target_user' not in data:
+        return jsonify({"error": "Thiếu group_name hoặc target_user"}), 400
+    with config_lock:
+        if not client_socket:
+            return jsonify({"error": "Chưa kết nối Socket"}), 400
+            
+    payload = {"type": "invite_group", "group_name": data['group_name'], "target_user": data['target_user']}
+    client_socket.send(json.dumps(payload).encode('utf-8'))
+    return jsonify({"status": "request_sent"})
+
+@app.route('/groups/accept', methods=['POST'])
+def accept_group():
+    data = request.json
+    if not data or 'group_name' not in data:
+        return jsonify({"error": "Thiếu group_name"}), 400
+    with config_lock:
+        if not client_socket:
+            return jsonify({"error": "Chưa kết nối Socket"}), 400
+            
+    payload = {"type": "join_group", "group_name": data['group_name']}
+    client_socket.send(json.dumps(payload).encode('utf-8'))
+    return jsonify({"status": "request_sent"})
+
+@app.route('/groups/info', methods=['GET'])
+def get_group_info():
+    with config_lock:
+        return jsonify({
+            "joined_groups": joined_groups,
+            "pending_invitations": pending_invitations
+        })
+
+@app.route('/groups/send', methods=['POST'])
+def send_group_message():
+    data = request.json
+    if not data or 'group_name' not in data or 'message' not in data:
+        return jsonify({"error": "Thiếu group_name/message"}), 400
+        
+    group_name = data['group_name']
+    message = data['message']
+    
+    with config_lock:
+        if not mpk or not username or not client_socket:
+            return jsonify({"error": "Chưa kết nối PKG/Socket"}), 400
+        if group_name not in local_group_sks:
+            return jsonify({"error": "Bạn chưa tham gia group này"}), 400
+            
+    # AES
+    session_key = get_random_bytes(32)
+    cipher_aes = AES.new(session_key, AES.MODE_EAX)
+    ciphertext, tag = cipher_aes.encrypt_and_digest(message.encode('utf-8'))
+    
+    # IBE - Encrypt for group_name
+    ibe_key_ctxt = ibe.encrypt(mpk, group_name, session_key)
+    
+    ibe_key_dict = {}
+    for k, v in ibe_key_ctxt.items():
+        type_str = str(type(v))
+        if isinstance(v, bytes):
+            ibe_key_dict[k] = {"type": "bytes", "data": base64.b64encode(v).decode('utf-8')}
+        elif 'integer' in type_str:
+            ibe_key_dict[k] = {"type": "integer", "data": str(int(v))}
+        elif 'pairing' in type_str:
+            ibe_key_dict[k] = {"type": "element", "data": base64.b64encode(objectToBytes(v, group)).decode('utf-8')}
+        else:
+            ibe_key_dict[k] = {"type": "str", "data": str(v)}
+                
+    payload = {
+        "type": "group_message",
+        "group_name": group_name,
+        "aes_nonce": base64.b64encode(cipher_aes.nonce).decode('utf-8'),
+        "aes_ciphertext": base64.b64encode(ciphertext).decode('utf-8'),
+        "aes_tag": base64.b64encode(tag).decode('utf-8'),
+        "ibe_enc_key": ibe_key_dict
+    }
+    
     try:
         client_socket.send(json.dumps(payload).encode('utf-8'))
         return jsonify({"status": "success"})

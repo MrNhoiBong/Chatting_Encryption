@@ -12,6 +12,7 @@ class RealTimeSocketServer:
         self.port = port
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.clients = {}  # {username: socket_connection}
+        self.groups = {}   # {group_name: {"members": set()}}
         self.lock = threading.Lock()
         
         # Identity-Based Encryption Setup (PKG)
@@ -89,6 +90,65 @@ class RealTimeSocketServer:
                             
                         elif msg_json.get("type") == "request_users":
                             self.send_user_list(username)
+                            
+                        elif msg_json.get("type") == "create_group":
+                            group_name = msg_json.get("group_name")
+                            with self.lock:
+                                if group_name in self.groups:
+                                    client_socket.send(json.dumps({"type": "system", "content": "Tên nhóm đã tồn tại."}).encode('utf-8'))
+                                    continue
+                                self.groups[group_name] = {"members": {username}}
+                                
+                            print(f"[*] Cấp phát IBE Private Key (SK) cho Nhóm: {group_name}")
+                            sk_group = self.ibe.extract(self.msk, group_name)
+                            sk_bytes = objectToBytes(sk_group, self.group)
+                            
+                            response = {
+                                "type": "group_created",
+                                "group_name": group_name,
+                                "sk_group": base64.b64encode(sk_bytes).decode('utf-8')
+                            }
+                            client_socket.send(json.dumps(response).encode('utf-8'))
+                            
+                        elif msg_json.get("type") == "invite_group":
+                            group_name = msg_json.get("group_name")
+                            target_user = msg_json.get("target_user")
+                            with self.lock:
+                                if group_name in self.groups and username in self.groups[group_name]["members"]:
+                                    if target_user in self.clients:
+                                        invitation = {
+                                            "type": "group_invitation",
+                                            "group_name": group_name,
+                                            "inviter": username
+                                        }
+                                        self.clients[target_user].send(json.dumps(invitation).encode('utf-8'))
+                                        
+                        elif msg_json.get("type") == "join_group":
+                            group_name = msg_json.get("group_name")
+                            with self.lock:
+                                if group_name in self.groups:
+                                    self.groups[group_name]["members"].add(username)
+                                    sk_group = self.ibe.extract(self.msk, group_name)
+                                    sk_bytes = objectToBytes(sk_group, self.group)
+                                    response = {
+                                        "type": "group_joined",
+                                        "group_name": group_name,
+                                        "sk_group": base64.b64encode(sk_bytes).decode('utf-8')
+                                    }
+                                    client_socket.send(json.dumps(response).encode('utf-8'))
+                                    
+                        elif msg_json.get("type") == "group_message":
+                            group_name = msg_json.get("group_name")
+                            with self.lock:
+                                if group_name in self.groups and username in self.groups[group_name]["members"]:
+                                    msg_json["sender"] = username
+                                    payload = json.dumps(msg_json).encode('utf-8')
+                                    for member in self.groups[group_name]["members"]:
+                                        if member != username and member in self.clients:
+                                            try:
+                                                self.clients[member].send(payload)
+                                            except:
+                                                pass
                             
                     except json.JSONDecodeError:
                         break # Cần chờ thêm data

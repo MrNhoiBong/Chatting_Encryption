@@ -1,17 +1,26 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { chatApi } from './api';
-import { Shield, User, Send, Settings, Search, MoreVertical, Paperclip, Smile, LogOut, ChevronRight, Zap } from 'lucide-react';
+import { Shield, User, Send, Settings, Search, MoreVertical, Paperclip, Smile, LogOut, ChevronRight, Zap, Plus, Users, UserPlus, X } from 'lucide-react';
 
 export default function App() {
   const [currentUser, setCurrentUser] = useState(null);
   const [connectionInfo, setConnectionInfo] = useState({ ip: 'host.docker.internal', port: 5000 });
   const [onlineUsers, setOnlineUsers] = useState([]);
+  const [joinedGroups, setJoinedGroups] = useState([]);
   const [messages, setMessages] = useState([]);
   const [selectedUser, setSelectedUser] = useState(null);
+  const [isGroupChat, setIsGroupChat] = useState(false);
   const [newMessage, setNewMessage] = useState('');
   const [error, setError] = useState(null);
   const [isConnecting, setIsConnecting] = useState(false);
+  const [pendingInvitations, setPendingInvitations] = useState([]);
+  const [ignoredInvites, setIgnoredInvites] = useState([]);
+  const [systemNotifications, setSystemNotifications] = useState([]);
+  const [isCreatingGroup, setIsCreatingGroup] = useState(false);
+  const [newGroupName, setNewGroupName] = useState('');
+  const [isInvitingToGroup, setIsInvitingToGroup] = useState(false);
+  const [inviteUsername, setInviteUsername] = useState('');
   
   const messagesEndRef = useRef(null);
 
@@ -50,7 +59,29 @@ export default function App() {
 
         const msgsResp = await chatApi.getMessages();
         if (msgsResp.messages && msgsResp.messages.length > 0) {
-          setMessages(prev => [...prev, ...msgsResp.messages.map(m => ({ ...m, timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }))]);
+          const sysMsgs = msgsResp.messages.filter(m => m.is_system);
+          const normalMsgs = msgsResp.messages.filter(m => !m.is_system);
+          
+          if (sysMsgs.length > 0) {
+            setSystemNotifications(prev => [...prev, ...sysMsgs.map(m => m.message)]);
+            sysMsgs.forEach(() => {
+              setTimeout(() => {
+                setSystemNotifications(prev => prev.slice(1));
+              }, 5000);
+            });
+          }
+
+          if (normalMsgs.length > 0) {
+            setMessages(prev => [...prev, ...normalMsgs.map(m => ({ ...m, timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }))]);
+          }
+        }
+
+        const groupInfoResp = await chatApi.getGroupInfo();
+        if (groupInfoResp.joined_groups) {
+          setJoinedGroups(groupInfoResp.joined_groups);
+        }
+        if (groupInfoResp.pending_invitations) {
+          setPendingInvitations(groupInfoResp.pending_invitations);
         }
       } catch (err) {
         console.error("Polling error:", err);
@@ -91,16 +122,53 @@ export default function App() {
     setNewMessage('');
     
     try {
-      await chatApi.sendMessage(selectedUser, msgText);
-      // We add our own message to the list immediately for UI feedback
-      setMessages(prev => [...prev, {
-        sender: currentUser,
-        receiver: selectedUser,
-        message: msgText,
-        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-      }]);
+      if (isGroupChat) {
+        await chatApi.sendGroupMessage(selectedUser, msgText);
+        setMessages(prev => [...prev, {
+          sender: currentUser,
+          receiver: selectedUser,
+          is_group: true,
+          message: msgText,
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        }]);
+      } else {
+        await chatApi.sendMessage(selectedUser, msgText);
+        setMessages(prev => [...prev, {
+          sender: currentUser,
+          receiver: selectedUser,
+          is_group: false,
+          message: msgText,
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        }]);
+      }
     } catch (err) {
       console.error("Failed to send:", err);
+    }
+  };
+
+  const handleCreateGroup = async (e) => {
+    e.preventDefault();
+    if (!newGroupName.trim()) return;
+    try {
+      await chatApi.createGroup(newGroupName);
+      setSelectedUser(newGroupName);
+      setIsGroupChat(true);
+      setIsCreatingGroup(false);
+      setNewGroupName('');
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const handleInviteToGroup = async (e) => {
+    e.preventDefault();
+    if (!inviteUsername.trim() || !selectedUser || !isGroupChat) return;
+    try {
+      await chatApi.inviteToGroup(selectedUser, inviteUsername);
+      setIsInvitingToGroup(false);
+      setInviteUsername('');
+    } catch (err) {
+      console.error(err);
     }
   };
 
@@ -190,8 +258,9 @@ export default function App() {
   }
 
   const currentChatMessages = messages.filter(m => 
-    (m.sender === selectedUser && m.receiver === currentUser) || 
-    (m.sender === currentUser && m.receiver === selectedUser)
+    isGroupChat 
+      ? (m.is_group && m.receiver === selectedUser)
+      : (!m.is_group && ((m.sender === selectedUser && m.receiver === currentUser) || (m.sender === currentUser && m.receiver === selectedUser)))
   );
 
   return (
@@ -231,14 +300,49 @@ export default function App() {
           </div>
 
           <div className="overflow-y-auto space-y-1">
-            <h3 className="text-[11px] font-bold text-slate-500 uppercase tracking-[0.2em] px-2 mb-4">Online Nodes</h3>
+            <div className="flex items-center justify-between px-2 mb-2 mt-4">
+              <h3 className="text-[11px] font-bold text-slate-500 uppercase tracking-[0.2em]">Groups</h3>
+              <button onClick={() => setIsCreatingGroup(true)} className="text-slate-400 hover:text-white transition-colors p-1 bg-slate-800 rounded-md">
+                 <Plus className="w-3 h-3" />
+              </button>
+            </div>
+            <div className="space-y-1 mb-4">
+              {joinedGroups.map(group => (
+                <button 
+                  key={group}
+                  onClick={() => { setSelectedUser(group); setIsGroupChat(true); }}
+                  className={`w-full flex items-center gap-3 p-3 rounded-xl transition-all duration-200 group ${
+                    selectedUser === group && isGroupChat
+                      ? 'bg-[#4f46e5]/10 border border-[#4f46e5]/20' 
+                      : 'hover:bg-slate-800/50 opacity-80'
+                  }`}
+                >
+                  <div className="relative">
+                    <div className="w-10 h-10 rounded-full bg-indigo-900/50 flex items-center justify-center font-bold text-indigo-400">
+                      <Users className="w-5 h-5" />
+                    </div>
+                  </div>
+                  <div className="text-left">
+                    <p className={`text-sm font-bold ${selectedUser === group && isGroupChat ? 'text-white' : 'text-slate-300'}`}>{group}</p>
+                    <p className="text-[10px] text-slate-500">Group Chat</p>
+                  </div>
+                </button>
+              ))}
+              {joinedGroups.length === 0 && (
+                <div className="px-3 py-4 text-center">
+                  <p className="text-[10px] uppercase tracking-widest text-slate-600 font-bold">No groups</p>
+                </div>
+              )}
+            </div>
+
+            <h3 className="text-[11px] font-bold text-slate-500 uppercase tracking-[0.2em] px-2 mb-2">Online Nodes</h3>
             <div className="space-y-1">
               {onlineUsers.map(user => (
                 <button 
                   key={user}
-                  onClick={() => setSelectedUser(user)}
+                  onClick={() => { setSelectedUser(user); setIsGroupChat(false); }}
                   className={`w-full flex items-center gap-3 p-3 rounded-xl transition-all duration-200 group ${
-                    selectedUser === user 
+                    selectedUser === user && !isGroupChat
                       ? 'bg-[#4f46e5]/10 border border-[#4f46e5]/20' 
                       : 'hover:bg-slate-800/50 opacity-80'
                   }`}
@@ -250,7 +354,7 @@ export default function App() {
                     <div className="absolute bottom-0 right-0 w-3 h-3 bg-emerald-500 border-2 border-slate-900 rounded-full"></div>
                   </div>
                   <div className="text-left">
-                    <p className={`text-sm font-bold ${selectedUser === user ? 'text-white' : 'text-slate-300'}`}>{user}</p>
+                    <p className={`text-sm font-bold ${selectedUser === user && !isGroupChat ? 'text-white' : 'text-slate-300'}`}>{user}</p>
                     <p className="text-[10px] text-slate-500">Active now</p>
                   </div>
                 </button>
@@ -278,15 +382,20 @@ export default function App() {
           <>
             <header className="h-20 flex-shrink-0 border-b border-slate-900 flex items-center justify-between px-8 z-10">
               <div className="flex items-center gap-4">
-                <div className="w-10 h-10 rounded-full bg-[#4f46e5]/20 flex items-center justify-center font-bold text-[#4f46e5]">
-                  {selectedUser[0].toUpperCase()}
+                <div className={`w-10 h-10 rounded-full ${isGroupChat ? 'bg-indigo-900/50 text-indigo-400' : 'bg-[#4f46e5]/20 text-[#4f46e5]'} flex items-center justify-center font-bold`}>
+                  {isGroupChat ? <Users className="w-5 h-5" /> : selectedUser[0].toUpperCase()}
                 </div>
                 <div>
-                  <h2 className="text-base font-bold text-white">Chat with {selectedUser}</h2>
+                  <h2 className="text-base font-bold text-white">{isGroupChat ? selectedUser : `Chat with ${selectedUser}`}</h2>
                   <p className="text-xs text-emerald-400 font-medium">Encrypted with Identity: {selectedUser}</p>
                 </div>
               </div>
               <div className="flex items-center gap-2">
+                {isGroupChat && (
+                  <button onClick={() => setIsInvitingToGroup(true)} className="p-2 text-slate-400 hover:bg-slate-800 transition-colors rounded-xl" title="Invite User">
+                    <UserPlus className="w-5 h-5" />
+                  </button>
+                )}
                 <button className="p-2 text-slate-400 hover:bg-slate-800 transition-colors rounded-xl">
                   <Search className="w-5 h-5" />
                 </button>
@@ -365,7 +474,7 @@ export default function App() {
               {onlineUsers.map(user => (
                 <button 
                   key={user}
-                  onClick={() => setSelectedUser(user)}
+                  onClick={() => { setSelectedUser(user); setIsGroupChat(false); }}
                   className="px-4 py-2 bg-slate-900 border border-slate-800 hover:border-emerald-500/50 rounded-xl transition-all flex items-center gap-2 group"
                 >
                   <User className="w-4 h-4 text-emerald-500" />
@@ -377,6 +486,135 @@ export default function App() {
           </div>
         )}
       </main>
+
+      {/* Group Invitation Popups */}
+      <div className="fixed bottom-4 right-4 z-50 flex flex-col gap-2 pointer-events-none">
+        <AnimatePresence>
+          {pendingInvitations.filter(inv => !ignoredInvites.includes(inv.group_name)).map((inv) => (
+            <motion.div
+              key={`inv-${inv.group_name}`}
+              initial={{ opacity: 0, x: 50, scale: 0.9 }}
+              animate={{ opacity: 1, x: 0, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.9, x: 50 }}
+              className="bg-slate-900 border border-slate-700 p-4 rounded-xl shadow-2xl flex flex-col gap-3 w-80 pointer-events-auto"
+            >
+              <p className="text-sm text-white">
+                <strong className="text-emerald-400">{inv.inviter}</strong> mời bạn tham gia <strong>{inv.group_name}</strong>
+              </p>
+              <div className="flex gap-2 justify-end mt-2">
+                <button 
+                  onClick={() => setIgnoredInvites(prev => [...prev, inv.group_name])}
+                  className="px-4 py-2 rounded-lg bg-slate-800 text-slate-300 text-xs font-bold hover:bg-slate-700 transition-colors"
+                >
+                  Không
+                </button>
+                <button 
+                  onClick={async () => {
+                    try {
+                      await chatApi.acceptGroupInvite(inv.group_name);
+                      setIgnoredInvites(prev => [...prev, inv.group_name]);
+                      setSelectedUser(inv.group_name);
+                      setIsGroupChat(true);
+                    } catch (e) {
+                      console.error(e);
+                    }
+                  }}
+                  className="px-4 py-2 rounded-lg bg-[#4f46e5] text-white text-xs font-bold hover:bg-[#4338ca] transition-colors"
+                >
+                  Đồng ý
+                </button>
+              </div>
+            </motion.div>
+          ))}
+        </AnimatePresence>
+      </div>
+
+      {/* System Notifications */}
+      <div className="fixed top-4 right-4 z-50 flex flex-col gap-2 pointer-events-none">
+        <AnimatePresence>
+          {systemNotifications.map((msg, idx) => (
+            <motion.div
+              key={`sys-${idx}-${msg}`}
+              initial={{ opacity: 0, x: 50, scale: 0.9 }}
+              animate={{ opacity: 1, x: 0, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.9, x: 50 }}
+              className="bg-red-900/90 border border-red-700 p-4 rounded-xl shadow-2xl flex items-center gap-3 w-80 pointer-events-auto"
+            >
+              <div className="flex-1">
+                <p className="text-sm text-white font-medium">{msg}</p>
+              </div>
+            </motion.div>
+          ))}
+        </AnimatePresence>
+      </div>
+
+      {/* Create Group Modal */}
+      <AnimatePresence>
+        {isCreatingGroup && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="bg-slate-900 border border-slate-700 p-6 rounded-2xl shadow-2xl w-96 max-w-[90%]"
+            >
+              <div className="flex justify-between items-center mb-4">
+                <h3 className="text-lg font-bold text-white">Create Group</h3>
+                <button onClick={() => setIsCreatingGroup(false)} className="text-slate-400 hover:text-white">
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+              <form onSubmit={handleCreateGroup}>
+                <input 
+                  type="text" 
+                  autoFocus
+                  placeholder="Group Name" 
+                  value={newGroupName}
+                  onChange={e => setNewGroupName(e.target.value)}
+                  className="w-full bg-slate-950/40 border border-slate-800 focus:border-[#4f46e5]/50 focus:ring-1 focus:ring-[#4f46e5]/50 rounded-xl py-3 px-4 text-white outline-none transition-all mb-4"
+                />
+                <button type="submit" className="w-full py-3 bg-[#4f46e5] hover:bg-[#4338ca] text-white font-bold rounded-xl shadow-lg transition-all">
+                  Create
+                </button>
+              </form>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Invite to Group Modal */}
+      <AnimatePresence>
+        {isInvitingToGroup && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="bg-slate-900 border border-slate-700 p-6 rounded-2xl shadow-2xl w-96 max-w-[90%]"
+            >
+              <div className="flex justify-between items-center mb-4">
+                <h3 className="text-lg font-bold text-white">Invite to {selectedUser}</h3>
+                <button onClick={() => setIsInvitingToGroup(false)} className="text-slate-400 hover:text-white">
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+              <form onSubmit={handleInviteToGroup}>
+                <input 
+                  type="text" 
+                  autoFocus
+                  placeholder="Username to invite" 
+                  value={inviteUsername}
+                  onChange={e => setInviteUsername(e.target.value)}
+                  className="w-full bg-slate-950/40 border border-slate-800 focus:border-[#4f46e5]/50 focus:ring-1 focus:ring-[#4f46e5]/50 rounded-xl py-3 px-4 text-white outline-none transition-all mb-4"
+                />
+                <button type="submit" className="w-full py-3 bg-[#4f46e5] hover:bg-[#4338ca] text-white font-bold rounded-xl shadow-lg transition-all">
+                  Send Invite
+                </button>
+              </form>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
